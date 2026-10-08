@@ -275,3 +275,122 @@ Conclusion: AF_UNIX sockets do not work inside this lab machine's user-profile d
 ### Current Status
 
 Partially completed — full `npx expo run:android` build in progress with `JAVA_HOME` (JDK 17), `ANDROID_HOME` and `JAVA_TOOL_OPTIONS` set.
+
+---
+
+## Entry 6 — Native build: "Filename longer than 260 characters"
+
+### Prompt / Request
+
+User (Portuguese): *"resolva o erro, para que fique funcional"* ("fix the error so it becomes functional").
+
+### Decision Summary
+
+With the loopback fix from Entry 5, Gradle compiled almost everything, then the C++ step of `:app` failed. Shortening the project path cannot fix it (see below), and enabling Windows long paths requires an administrator registry change on a lab machine, which the agent will not make. Chosen fix: stop compiling the package that produces the long path.
+
+### Actions Performed
+
+1. Read the ninja error, measured the path length.
+2. Tried building from a `subst T:` drive letter mapped to the project → Gradle failed while evaluating `settings.gradle` (Expo autolinking runs `node` via `cmd` and mixes `T:` and the real `C:` path). Reverted (`subst T: /D`).
+3. Investigated who needs `react-native-gesture-handler`: it is **not** an app dependency; it is an *optional* peer dependency of `expo-router` that npm auto-installed. Inside `expo-router` it is only imported by `layouts/JSStack.js` (the `expo-router/js-stack` entry point). The app uses the native `Stack` (`react-native-screens`), so the JS bundle never loads it.
+4. Added to `package.json`:
+   ```json
+   "expo": { "autolinking": { "exclude": ["react-native-gesture-handler"] } }
+   ```
+   (`expo-modules-autolinking` applies `exclude` to React Native community modules too — verified in `reactNativeConfig.js`.) Deleted the stale `android/app/.cxx` cache.
+
+### Result
+
+`BUILD SUCCESSFUL in 2m 57s`; APK installed on the emulator; Metro bundled; app rendered the Task List with the 4 seeded categories. No JS errors in logcat.
+
+### Problems / Errors
+
+```
+ninja: error: Stat(rngesturehandler_codegen_autolinked_build/CMakeFiles/react_codegen_rngesturehandler_codegen.dir/C_/Users/aluno.lab03/Documents/todolist-expo/node_modules/react-native-gesture-handler/shared/shadowNodes/react/renderer/components/rngesturehandler_codegen/RNGestureHandlerDetectorShadowNode.cpp.o): Filename longer than 260 characters
+```
+Full path = 364 chars. The relative part alone is 293 chars and embeds the absolute source path, so even a project at `C:\t` would be ~294 chars. `LongPathsEnabled = 0` on this machine; SDK ninja is 1.10.2.
+
+### Fixes Attempted
+
+- `subst` drive (failed, see above).
+- Autolinking exclusion (worked).
+- If gesture-based navigation (JS stack / drawer) is needed in the future, the alternatives are enabling Windows long paths (admin) or building on macOS/Linux/EAS.
+
+### Current Status
+
+Completed.
+
+---
+
+## Entry 7 — Bug found during manual testing: Android time picker resets the selection
+
+### Prompt / Request
+
+Found while testing "Task due date changed → reschedule" (spec section 10) on the emulator.
+
+### Decision Summary
+
+Use the imperative `DateTimePickerAndroid.open()` API on Android instead of rendering `<DateTimePicker>` conditionally.
+
+### Actions Performed
+
+- Reproduced: open the time dialog, pick hour 6, then minute 15 → the dialog jumped back to 7:00 and OK saved 7:00 PM. Once the dialog also disappeared/reappeared by itself.
+- Root cause (read `datetimepicker.android.js`): the declarative component calls `DateTimePickerAndroid.open()` in an effect whose dependencies include `onValueChange`/`onDismiss`. `DueDateField` passed inline arrow functions, and the editor re-renders every 30 s because of `useNow` (Entry 3), so each re-render re-opened the dialog with the original value.
+- `src/components/DueDateField.tsx`: removed the `androidPicker` state and the conditional `<DateTimePicker>`; the Date/Time buttons now call `DateTimePickerAndroid.open({ value, mode, onValueChange })`. iOS keeps the inline compact pickers (native views, not affected).
+
+### Result
+
+Picking 6:20 PM now sticks. `tsc` and `expo lint` clean.
+
+### Problems / Errors
+
+Interaction between two earlier decisions (periodic `useNow` re-render + inline callbacks) that typecheck/lint could not detect — only found by running the app.
+
+### Current Status
+
+Completed.
+
+---
+
+## Entry 8 — Runtime validation on the emulator and on a physical phone
+
+### Prompt / Request
+
+Spec sections 19–20, and the user (Portuguese): *"faz rodar no meu celular que conectei por depuração usb"* ("make it run on my phone that I connected via USB debugging").
+
+### Decision Summary
+
+Validate the acceptance criteria on the Android 16 emulator with adb UI automation (`uiautomator dump` + `input tap`), checking the OS state directly (`dumpsys alarm`, `dumpsys notification`) rather than trusting the UI. Then install the same development build on the user's phone.
+
+### Actions Performed / Results (emulator `Medium_Phone`)
+
+| Test | Evidence | Result |
+|---|---|---|
+| Create task "Submit mobile assignment", category Work, due 19:00 | Listed with "Pending", "Work", "Due Thu, Oct 08, 2026 · 7:00 PM" | ✅ |
+| Permission requested in context on first save with due date | Android dialog "Allow To-Do to send you notifications?" → Allow | ✅ |
+| Reminder scheduled | `dumpsys alarm`: `RTC_WAKEUP ... origWhen=2026-10-08 19:00:00 ... NOTIFICATION_EVENT` | ✅ |
+| Complete → reminder cancelled; reopen → rescheduled | pending alarms 1 → 0 → 1 | ✅ |
+| Edit due time 19:00 → 18:20 | only one alarm left, `origWhen=18:20` (old one cancelled) | ✅ (after Entry 7 fix) |
+| Notification fires | `dumpsys notification`: channel `task-reminders`, title "Task reminder", text "Submit mobile assignment" | ✅ |
+| Create category "Health"; duplicate "health" | inline error `A category named "health" already exists.` | ✅ |
+| Rename Study → School | list shows School | ✅ |
+| Delete Work (1 task) | confirmation "1 task(s) use this category. They will be kept and become uncategorized."; task shows no category | ✅ |
+| Status filters All / Pending / Completed | 1 / 1 / 0 tasks as expected | ✅ |
+| Category filter | Uncategorized/category chips filter the list; a stale filter shows "No tasks match the selected filters." | ✅ |
+| Create task with due date then delete it | pending alarms 1 → 0 | ✅ |
+| Persistence | `am force-stop` + relaunch → tasks and renamed/new categories still present | ✅ |
+
+**Physical phone (Redmi Note 13, model `23129RA5FL`, USB debugging):**
+- `npx expo run:android --device dc665050` failed: `Could not find device with name: dc665050` — Expo's `--device` expects the device *name*; `--device 23129RA5FL` worked.
+- Built arm64 native code (`BUILD SUCCESSFUL in 5m 9s`) and installed the APK.
+- The dev launcher could not reach Metro via the PC's LAN IP (same lab-network issue as Entry 4). Fixed with `adb -s dc665050 reverse tcp:8082 tcp:8082` and connecting the launcher to `http://127.0.0.1:8082`. The app then bundled and showed the Task List.
+
+### Problems / Errors
+
+- Typing via adb into an autofocused field dropped the first character once ("ubmit") — test-automation timing, not an app bug.
+- The dev-client floating "Tools" button overlaps the header's "Categories" link. Development builds only; production builds don't have it.
+- Inexact alarms: `dumpsys alarm` shows a delivery `window` (e.g. `+38m` for a reminder ~50 min away, `+4m` for one ~7 min away). Android may deliver reminders a few minutes late because the app does not hold exact-alarm permission at runtime (Android 14+ denies `SCHEDULE_EXACT_ALARM` by default). Acceptable for a to-do app; documented as a limitation.
+
+### Current Status
+
+Completed (Android). iOS was not tested (no macOS available).

@@ -1,5 +1,4 @@
-import DateTimePicker from '@react-native-community/datetimepicker';
-import { useState } from 'react';
+import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useNow } from '@/hooks/useNow';
@@ -33,8 +32,6 @@ function merge(base: Date, picked: Date, mode: PickerMode): number {
 }
 
 export function DueDateField({ value, onChange }: Props) {
-  // Android shows the picker as a dialog: render it only while it should be open.
-  const [androidPicker, setAndroidPicker] = useState<PickerMode | null>(null);
   const now = useNow();
 
   if (value === null) {
@@ -53,8 +50,17 @@ export function DueDateField({ value, onChange }: Props) {
   const isPast = value <= now;
 
   const handlePicked = (mode: PickerMode, picked: Date) => {
-    setAndroidPicker(null);
     onChange(merge(current, picked, mode));
+  };
+
+  // Android: use the imperative API. The declarative <DateTimePicker> re-opens (and resets)
+  // the dialog whenever its callback props change identity, i.e. on every re-render.
+  const openAndroidPicker = (mode: PickerMode) => {
+    DateTimePickerAndroid.open({
+      value: current,
+      mode,
+      onValueChange: (_, picked) => handlePicked(mode, picked),
+    });
   };
 
   return (
@@ -79,7 +85,7 @@ export function DueDateField({ value, onChange }: Props) {
           <Pressable
             testID="pick-date"
             style={({ pressed }) => [styles.valueButton, pressed && styles.pressed]}
-            onPress={() => setAndroidPicker('date')}
+            onPress={() => openAndroidPicker('date')}
           >
             <Text style={styles.valueLabel}>Date</Text>
             <Text style={styles.valueText}>{formatDate(current)}</Text>
@@ -87,22 +93,13 @@ export function DueDateField({ value, onChange }: Props) {
           <Pressable
             testID="pick-time"
             style={({ pressed }) => [styles.valueButton, pressed && styles.pressed]}
-            onPress={() => setAndroidPicker('time')}
+            onPress={() => openAndroidPicker('time')}
           >
             <Text style={styles.valueLabel}>Time</Text>
             <Text style={styles.valueText}>{formatTime(current)}</Text>
           </Pressable>
         </View>
       )}
-
-      {androidPicker !== null ? (
-        <DateTimePicker
-          value={current}
-          mode={androidPicker}
-          onValueChange={(_, picked) => handlePicked(androidPicker, picked)}
-          onDismiss={() => setAndroidPicker(null)}
-        />
-      ) : null}
 
       {isPast ? (
         <Text style={styles.warning}>

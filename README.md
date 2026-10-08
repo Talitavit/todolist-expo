@@ -44,6 +44,27 @@ JavaScript changed, `npx expo start` is enough (the installed development build 
 
 If port 8081 is busy, use `npx expo run:android --port 8082`.
 
+### Physical Android phone (USB debugging)
+
+`--device` takes the device **name** (model), not the adb serial. List devices with `adb devices -l`.
+
+```bash
+npx expo run:android --device 23129RA5FL --port 8082
+```
+
+If the app's launcher can't reach Metro over Wi-Fi (e.g. on a restricted network), tunnel it over USB
+and enter `http://127.0.0.1:8082` in the launcher's URL field:
+
+```bash
+adb -s <serial> reverse tcp:8082 tcp:8082
+```
+
+### Known build note: `react-native-gesture-handler` is excluded from autolinking
+
+`package.json` → `expo.autolinking.exclude` skips `react-native-gesture-handler`. On Windows its C++
+codegen paths exceed 260 characters ("Filename longer than 260 characters"). The app doesn't use it
+(it's an optional peer of `expo-router`, needed only by `expo-router/js-stack`). See BUILD_LOG Entry 6.
+
 ### Windows troubleshooting: `Unable to establish loopback connection`
 
 On some Windows machines (e.g. lab PCs with managed user profiles) Gradle fails with
@@ -58,6 +79,14 @@ $env:JAVA_HOME = 'C:\Program Files\Microsoft\jdk-17.0.16.8-hotspot'   # adjust t
 $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 npx expo run:android
 ```
+
+## Known limitations
+
+- Tested on Android only (emulator API 37 and a Redmi Note 13). iOS code paths exist but were not run.
+- Reminders use inexact alarms, so Android may deliver them a few minutes after the due time.
+- Reminders don't repeat and there's no snooze. Tasks with a past due date get no reminder (the editor
+  shows a warning).
+- The development build's floating "Tools" button can cover the "Categories" header link.
 
 ## Checks
 
