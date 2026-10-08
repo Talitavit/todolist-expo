@@ -177,3 +177,101 @@ Added `src/hooks/useNow.ts` (current time kept in state, refreshed every 30 s) a
 ### Current Status
 
 Needs testing (runtime test on the Android emulator is next).
+
+---
+
+## Entry 4 — First runtime test in Expo Go: app fails to load (expo-notifications)
+
+### Prompt / Request
+
+Spec section 19 ("Do not assume that generated code is correct. Whenever possible: build the project; run it; ...").
+
+### Decision Summary
+
+Run the app on the Android emulator with Expo Go (`npx expo start --android`), as planned in Entry 1.
+
+### Actions Performed
+
+- `npx expo start --android` → port 8081 was already used by another (unrelated) Node process, so the server was started on port **8082**.
+- Expo CLI installed Expo Go on the emulator and Metro bundled successfully (`Android Bundled 24683ms ... (1532 modules)`).
+
+### Result
+
+**Broken.** The app never rendered.
+
+### Problems / Errors
+
+1. The device stayed on "Bundling 56%..." even though Metro reported the bundle as done. The device was loading from the LAN IP (`exp://10.35.23.13:8082`), which appears to be blocked/stalled on the lab network.
+2. After fixing (1), the app showed a red screen:
+   ```
+   Uncaught Error: expo-notifications: Android Push notifications (remote notifications)
+   functionality provided by expo-notifications was removed from Expo Go with the release
+   of SDK 53. Use a development build instead of Expo Go.
+   ```
+   followed by `Route "./_layout.tsx" is missing the required default export` and
+   `TypeError: Cannot read property 'ErrorBoundary' of undefined`.
+   The error is thrown while *importing* the module, so every route that imports it fails to load.
+   Root cause (found by reading `node_modules/expo-notifications/build`): the package entry point imports the side-effect module `DevicePushTokenAutoRegistration.fx.js`, which calls `addPushTokenListener()` at import time; that function calls `warnOfExpoGoPushUsage()`, which **throws on Android when running in Expo Go**.
+   **Incorrect assumption:** Entry 1 assumed (from the docs page) that local notifications still work in Expo Go on Android. With `expo-notifications@57.0.22` the module cannot even be imported there.
+
+### Fixes Attempted
+
+- (1) `adb reverse tcp:8082 tcp:8082` and opened `exp://127.0.0.1:8082` → bundle loaded.
+- (2) Alternatives considered:
+  - deep-importing individual files from `expo-notifications/build/...` to skip the side-effect module — rejected: relies on private package internals and could break on any update;
+  - disabling notifications when running in Expo Go — rejected: the spec requires working notifications;
+  - **chosen:** switch to a **development build** (`npx expo run:android`), the approach recommended by the error message, the Expo docs and the template's `AGENTS.md`. Added `expo-dev-client` (`~57.0.19`) so the debug app has the dev launcher and can connect to Metro on port 8082. Build uses the local Android SDK and JDK 17 (`JAVA_HOME` set explicitly because JDK 25 is first on `PATH`). The generated `android/` folder stays git-ignored (Continuous Native Generation): the `app.json` permissions/plugins from Entry 2 now actually take effect.
+
+### Current Status
+
+Blocked → fix in progress (development build).
+
+---
+
+## Entry 5 — Development build: Gradle "Unable to establish loopback connection"
+
+### Prompt / Request
+
+Continuation of Entry 4. Mid-way the user asked (in Portuguese): *"deu uns erro ai, tai fazendo oq agora"* ("there were some errors there, what are you doing now?"). The agent summarized the two blocking errors and the fix in progress.
+
+### Decision Summary
+
+Keep the development-build approach; diagnose the Gradle failure rather than going back to Expo Go.
+
+### Actions Performed
+
+1. `npx expo run:android --port 8082` → `expo prebuild` generated `android/`, then Gradle failed.
+2. Port 8082 was still held by the orphaned Expo Go Metro process from Entry 4; that process (started by the agent) was stopped.
+3. Gradle run with `--stacktrace` to get the root cause.
+
+### Result
+
+Gradle could not even start its daemon connection.
+
+### Problems / Errors
+
+```
+* What went wrong:
+java.io.IOException: Unable to establish loopback connection
+Caused by: java.net.SocketException: Invalid argument: connect
+    at sun.nio.ch.UnixDomainSockets.connect0(Native Method)
+    at sun.nio.ch.PipeImpl$Initializer$LoopbackConnector.run(PipeImpl.java:133)
+```
+
+On Windows, JDK 16+ implements NIO `Selector` wake-up pipes with **AF_UNIX sockets** created in the temp directory. Reading `PipeImpl.java` / `UnixDomainSocketsUtil.java` from the JDK's `src.zip` showed: the socket *binds* successfully but `connect` fails with EINVAL, and the JDK does not fall back to TCP in that case. The temp dir is resolved from `jdk.net.unixdomain.tmpdir`, then `%TEMP%`.
+
+### Fixes Attempted
+
+| Attempt | Result |
+|---|---|
+| Run Gradle from PowerShell instead of Git Bash | Same error |
+| `TEMP`/`TMP` changed from the 8.3 short path (`C:\Users\ALUNO~2.LAB\...`) to the long path | Same error |
+| Run outside the agent's command sandbox | Same error → not caused by the agent tooling |
+| JDK 25 instead of JDK 17 | Same error |
+| `JAVA_TOOL_OPTIONS=-Djdk.net.unixdomain.tmpdir=C:\gtmp` (directory **outside the lab user profile**) | **Fixed** — Gradle started; next error was only `SDK location not found` because `ANDROID_HOME` had not been exported in that test shell. |
+
+Conclusion: AF_UNIX sockets do not work inside this lab machine's user-profile directory (probably a profile/file-system policy of the lab environment). The workaround is documented in `README.md`. It is only needed on machines with this problem.
+
+### Current Status
+
+Partially completed — full `npx expo run:android` build in progress with `JAVA_HOME` (JDK 17), `ANDROID_HOME` and `JAVA_TOOL_OPTIONS` set.
